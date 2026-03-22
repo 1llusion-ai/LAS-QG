@@ -11,291 +11,333 @@ from src.schemas.types import (
 from src.generation.llm_client import BaseLLM
 
 
-EXTRACTION_PROMPT = """你是一个法规文本规则抽取助手。你的任务是从文本中抽取"完整的规范性规则"，用于构建规则知识图谱。
+EXTRACTION_PROMPT = """
+你是一个信息抽取系统（DeepIE风格）。
 
-=====================
-【核心原则（必须严格遵守）】
-=====================
+你的任务是：从输入的低空安全领域法律文本中抽取“实体-关系-实体”三元组。
 
-1. 规则必须是完整语义单元：
-   ✔ 谁，在什么条件下，对什么对象，做什么行为
-   ❌ 不允许只输出"应当 / 必须 / 依法"等单词
+================================
+【输出格式】
 
-2. 情态词（依法 / 应当 / 不得 / 可以 / 方可 / 负责）：
-   - 只能作为 modality 字段
-   - 绝不能单独成为规则
-
-3. 避免过度拆分（非常重要）：
-   - 如果多个行为共享同一主体和语境，应合并为一条规则
-   - 不要把并列动词机械拆成多条规则
-
-4. 区分"主行为"和"目的"：
-   - 主行为：核心动作（如：加强、适用、批准、实施）
-   - 目的/结果：如"预防…增进…维护…"
-   - 目的应放入 purpose_text，不要拆成独立规则
-
-5. 条件与范围：
-   - 条件（如：经批准后、本法没有规定的）→ condition_text
-   - 范围（如：在某区域内）→ scope_text
-
-6. 法律依据：
-   - 如"根据宪法"、"依照本法" → basis_text
-
-7. 非行为性条文处理：
-   - 立法目的、定义性条文，不强行构造规则
-   - 如果确实没有行为规则，可以返回空 rules
-
-8. 只基于原文，不允许臆造
-
-9. 信息缺失时：
-   - 使用 null
-   - 不允许编造
-
-=====================
-【输出格式（必须严格一致）】
-=====================
-
+[
 {
-  "rules": [
-    {
-      "label": "规则简短描述（≤20字）",
-      "subjects": ["主体1", "主体2"],
-      "action": "核心行为",
-      "objects": ["对象1", "对象2"],
-      "modality": "应当|不得|可以|方可|负责|依法|null",
-      "condition_text": "条件原文，没有则为 null",
-      "basis_text": "法律依据，没有则为 null",
-      "scope_text": "适用范围，没有则为 null",
-      "purpose_text": "目的或效果，没有则为 null",
-      "evidence_text": "原文片段"
-    }
-  ]
+  "head": "...",
+  "relation": "...",
+  "tail": "...",
 }
+]
 
-=====================
-【示例1：简单规则】
-=====================
+================================
+【核心抽取规则】
 
-文本：
-公安机关及其人民警察依法履行治安管理职责。
+1. 三元组定义：
+- head：主体实体
+- relation：关系（动作）
+- tail：客体实体
+
+--------------------------------
+2. 实体要求：
+- 必须来自原文
+- 必须是完整语义单位
+- 不使用“其 / 该 / 本”等代词
+- 尽量具体
+
+--------------------------------
+3. 关系要求（重要）：
+- 使用语义明确动词
+- 推荐：
+  监督管理、批准、编制、纳入、保护、办理审批、提出申请、
+  责令改正、罚款、行政拘留、应当具备、衔接、
+  罚款金额、拘留期限、没收对象、吊销期限、暂扣期限
+
+- 禁止：
+  是、进行、开展、作出（无语义）
+
+--------------------------------
+4. 三类条款处理规则
+
+【A 行为类】
+主体 → 行为 → 对象
+
+【B 条件类】
+主体 → 应当具备 → 每一项条件
+❗ 必须展开，不允许丢弃
+
+--------------------------------
+【C 处罚类（重点规则）】
+
+必须抽取：
+
+1）违法行为（必须保留原文）
+2）处罚主体
+3）处罚措施（罚款 / 拘留 / 吊销等）
+4）处罚属性（金额 / 时间 / 对象）
+
+--------------------------------
+【处罚类强制约束（核心）】
+
+❗ 禁止：
+
+- tail = "违反本条例的行为"
+- tail = "违法行为"
+
+❗ 必须：
+
+✔ 使用原文中的具体违法行为描述
+
+--------------------------------
+【处罚属性绑定规则（最重要）】
+
+所有处罚属性必须绑定“违法行为”，不能绑定处罚词
+
+✔ 正确：
+
+("某违法行为", "罚款金额", "10万元以上50万元以下")
+("某违法行为", "拘留期限", "5日以上10日以下")
+("某违法行为", "没收对象", "违法所得")
+
+❌ 错误：
+
+("罚款", "金额", "10万元")
+("拘留", "期限", "5日")
+
+--------------------------------
+【处罚结构标准（统一）】
+
+对于处罚条款，应输出：
+
+1）处罚机关 → 处罚措施 → 违法行为
+2）违法行为 → 处罚属性 → 数值/对象
+
+--------------------------------
+5. 多关系规则：
+- 并列动作必须拆分
+- 条件列表必须拆分
+- 一个句子可产生多个三元组
+
+--------------------------------
+6. 抽取范围限制：
+
+以下情况返回空数组：
+
+- 纯立法目的（如：制定本条例）
+- 纯定义（如：分为）
+- 完全无行为关系
+
+⚠️ 注意：
+如果句子包含“应当 / 不得 / 处罚 / 条件”，必须抽取
+
+================================
+【Few-shot 示例】
+
+示例1（监管）
+输入：
+国务院民用航空主管部门依法对全国民用机场实施行业监督管理。
 
 输出：
-{
-  "rules": [
-    {
-      "label": "依法履行治安管理职责",
-      "subjects": ["公安机关", "人民警察"],
-      "action": "履行",
-      "objects": ["治安管理职责"],
-      "modality": "依法",
-      "condition_text": null,
-      "basis_text": null,
-      "scope_text": null,
-      "purpose_text": null,
-      "evidence_text": "公安机关及其人民警察依法履行治安管理职责。"
-    }
-  ]
-}
+[
+{"head": "国务院民用航空主管部门", "relation": "监督管理", "tail": "全国民用机场"}
+]
 
-=====================
-【示例2：条件规则】
-=====================
-
-文本：
-经民用航空管理部门批准后，方可实施。
+--------------------------------
+示例2（条件类）
+输入：
+企业应当具备下列条件：取得许可，有设备，有人员。
 
 输出：
-{
-  "rules": [
-    {
-      "label": "批准后方可实施",
-      "subjects": [null],
-      "action": "实施",
-      "objects": [null],
-      "modality": "方可",
-      "condition_text": "经民用航空管理部门批准后",
-      "basis_text": null,
-      "scope_text": null,
-      "purpose_text": null,
-      "evidence_text": "经民用航空管理部门批准后，方可实施。"
-    }
-  ]
-}
+[
+{"head": "企业", "relation": "应当具备", "tail": "许可"},
+{"head": "企业", "relation": "应当具备", "tail": "设备"},
+{"head": "企业", "relation": "应当具备", "tail": "人员"}
+]
 
-=====================
-【示例3：避免过度拆分】
-=====================
+--------------------------------
+示例3（罚款类）
 
-文本：
-各级人民政府应当加强社会治安综合治理，采取有效措施，预防和化解社会矛盾纠纷，增进社会和谐，维护社会稳定。
+输入：
+在机场区域内违规设置设施，未设置警示标志的，由管理机构责令改正，并处10万元以上50万元以下罚款。
 
 输出：
-{
-  "rules": [
-    {
-      "label": "政府加强治安治理维护稳定",
-      "subjects": ["各级人民政府"],
-      "action": "加强并采取措施",
-      "objects": ["社会治安综合治理"],
-      "modality": "应当",
-      "condition_text": null,
-      "basis_text": null,
-      "scope_text": null,
-      "purpose_text": "预防和化解社会矛盾纠纷，增进社会和谐，维护社会稳定",
-      "evidence_text": "各级人民政府应当加强社会治安综合治理，采取有效措施，预防和化解社会矛盾纠纷，增进社会和谐，维护社会稳定。"
-    }
-  ]
-}
+[
+{"head": "管理机构", "relation": "责令改正", "tail": "在机场区域内违规设置设施且未设置警示标志的行为"},
+{"head": "管理机构", "relation": "罚款", "tail": "在机场区域内违规设置设施且未设置警示标志的行为"},
+{"head": "在机场区域内违规设置设施且未设置警示标志的行为", "relation": "罚款金额", "tail": "10万元以上50万元以下"}
+]
 
-=====================
-【示例4：补充适用规则】
-=====================
+--------------------------------
+示例4（拘留类）
 
-文本：
-本法没有规定的，适用《中华人民共和国行政处罚法》的有关规定。
+输入：
+有下列行为之一的，处五日以下拘留；情节较重的，处五日以上十日以下拘留。
 
 输出：
-{
-  "rules": [
-    {
-      "label": "未规定时适用行政处罚法",
-      "subjects": [null],
-      "action": "适用",
-      "objects": ["中华人民共和国行政处罚法"],
-      "modality": null,
-      "condition_text": "本法没有规定的",
-      "basis_text": null,
-      "scope_text": null,
-      "purpose_text": null,
-      "evidence_text": "本法没有规定的，适用《中华人民共和国行政处罚法》的有关规定。"
-    }
-  ]
-}
+[
+{"head": "实施相关违法行为的行为", "relation": "拘留期限", "tail": "五日以下"},
+{"head": "情节较重的相关违法行为", "relation": "拘留期限", "tail": "五日以上十日以下"}
+]
 
-=====================
-【重要约束】
-=====================
+--------------------------------
+示例5（负样本）
+输入：
+为了规范民用机场建设，制定本条例。
 
-- 不输出 entities / actions / edges
-- 不输出解释说明
-- 不输出 markdown
-- 不输出多余字段
-- 不允许只输出"应当""必须""规定"等词
+输出：
+[]
 
-=====================
-【待抽取文本】
-=====================
-
+================================
+【输入文本】
 {text}
 
-=====================
-【输出要求】
-=====================
-
+================================
 只输出 JSON：
 """
 
 
 class RuleKGExtractor:
-    def __init__(self, llm: Optional[BaseLLM] = None):
+    def __init__(self, llm: Optional[BaseLLM] = None, doc_title: str = ""):
         self.llm = llm
+        self.doc_title = doc_title
 
-    def extract(self, chunk: DocumentChunk) -> dict:
+    def extract(self, chunk: DocumentChunk, chunk_index: int = 0) -> dict:
         if self.llm:
-            return self._llm_extract(chunk)
-        return self._rule_based_extract(chunk)
+            return self._llm_extract(chunk, chunk_index)
+        return self._rule_based_extract(chunk, chunk_index)
 
-    def _llm_extract(self, chunk: DocumentChunk) -> dict:
+    def _llm_extract(self, chunk: DocumentChunk, chunk_index: int = 0) -> dict:
         prompt = EXTRACTION_PROMPT.replace("{text}", chunk.content)
 
         try:
+            print(f"\n[LLM抽取] 正在处理 chunk {chunk_index}: {chunk.id[:8]}...")
+            print(f"[LLM抽取] 文本片段: {chunk.content[:100]}...")
+            
             response = self.llm.generate(prompt)
+            
             if response is None:
-                return self._rule_based_extract(chunk)
+                print("[LLM抽取] LLM返回None，使用规则抽取")
+                return self._rule_based_extract(chunk, chunk_index)
+
+            print(f"[LLM抽取] LLM响应:\n{response[:500]}..." if len(response) > 500 else f"[LLM抽取] LLM响应:\n{response}")
 
             response_clean = response.strip()
             if not response_clean:
-                return self._rule_based_extract(chunk)
+                print("[LLM抽取] 响应为空，使用规则抽取")
+                return self._rule_based_extract(chunk, chunk_index)
 
             response_clean = re.sub(r"^```json\s*", "", response_clean)
             response_clean = re.sub(r"^```\s*", "", response_clean)
             response_clean = re.sub(r"\s*```$", "", response_clean)
             response_clean = response_clean.strip()
 
-            if not response_clean.startswith("{"):
-                return self._rule_based_extract(chunk)
+            if not response_clean.startswith("[") and not response_clean.startswith("{"):
+                print(f"[LLM抽取] 响应格式不正确(不以[或{{开头)，使用规则抽取")
+                return self._rule_based_extract(chunk, chunk_index)
 
             data = json.loads(response_clean)
-            return self._process_extraction_result(data, chunk)
-        except (json.JSONDecodeError, KeyError, TypeError):
-            return self._rule_based_extract(chunk)
-        except Exception:
-            return self._rule_based_extract(chunk)
+            result = self._process_extraction_result(data, chunk, self.doc_title, chunk_index)
+            print(f"[LLM抽取] 成功抽取 {len(result.get('rules', []))} 条三元组")
+            return result
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            print(f"[LLM抽取] JSON解析错误: {e}，使用规则抽取")
+            return self._rule_based_extract(chunk, chunk_index)
+        except Exception as e:
+            print(f"[LLM抽取] 异常: {type(e).__name__}: {e}，使用规则抽取")
+            import traceback
+            traceback.print_exc()
+            return self._rule_based_extract(chunk, chunk_index)
 
-    def _process_extraction_result(self, data: dict, chunk: DocumentChunk) -> dict:
+    def _process_extraction_result(self, data, chunk: DocumentChunk, doc_title: str = "", chunk_index: int = 0) -> dict:
         rules = []
 
-        for r in data.get("rules", []):
-            subjects = r.get("subjects", [])
-            if isinstance(subjects, str):
-                subjects = [subjects] if subjects else []
-            subjects = [s for s in subjects if s is not None and s != "null"]
+        if isinstance(data, list):
+            triples = data
+        elif isinstance(data, dict) and "rules" in data:
+            triples = data.get("rules", [])
+        else:
+            return {"rules": rules}
 
-            objects = r.get("objects", [])
-            if isinstance(objects, str):
-                objects = [objects] if objects else []
-            objects = [o for o in objects if o is not None and o != "null"]
+        for triple in triples:
+            head = triple.get("head", "")
+            relation = triple.get("relation", "")
+            tail = triple.get("tail", "")
+
+            if not head or not relation or not tail:
+                continue
+
+            label = f"{head} {relation} {tail}"
+
+            source_text = triple.get("source_text") or chunk.content
+            article = triple.get("article") or chunk.metadata.get("article_no", "")
 
             rules.append({
                 "id": str(uuid.uuid4()),
-                "label": r.get("label", ""),
-                "subjects": subjects,
-                "action": r.get("action") if r.get("action") != "null" else None,
-                "objects": objects,
-                "modality": r.get("modality") if r.get("modality") != "null" else None,
-                "condition_text": r.get("condition_text") if r.get("condition_text") != "null" else None,
-                "basis_text": r.get("basis_text") if r.get("basis_text") != "null" else None,
-                "scope_text": r.get("scope_text") if r.get("scope_text") != "null" else None,
-                "purpose_text": r.get("purpose_text") if r.get("purpose_text") != "null" else None,
-                "evidence_text": r.get("evidence_text") if r.get("evidence_text") != "null" else None,
+                "label": label,
+                "head": head,
+                "relation": relation,
+                "tail": tail,
+                "doc_title": triple.get("doc_title") or doc_title,
+                "article": article,
+                "chunk_id": triple.get("chunk_id") or chunk_index,
+                "source_text": source_text,
+                "subjects": [head],
+                "action": relation,
+                "objects": [tail],
+                "modality": None,
+                "condition_text": None,
+                "basis_text": None,
+                "scope_text": None,
+                "purpose_text": None,
+                "evidence_text": source_text,
                 "source_chunk_id": chunk.id,
-                "article_no": chunk.metadata.get("article_no", ""),
+                "article_no": article,
             })
 
         return {"rules": rules}
 
-    def _rule_based_extract(self, chunk: DocumentChunk) -> dict:
+    def _rule_based_extract(self, chunk: DocumentChunk, chunk_index: int = 0) -> dict:
         content = chunk.content
         rules = []
 
-        rule_keywords = {
-            "应当": ["应当", "应该", "需要"],
-            "不得": ["不得", "禁止", "严禁", "不能", "不应"],
-            "可以": ["可以", "允许", "准许"],
-            "方可": ["方可", "才能"],
-            "负责": ["负责", "承担责任"],
-            "依法": ["依法", "按照法律规定"],
-        }
+        relation_patterns = [
+            (r"(.+?)应当(.+?)，", "应当"),
+            (r"(.+?)不得(.+?)。", "不得"),
+            (r"(.+?)可以(.+?)。", "可以"),
+            (r"(.+?)经(.+?)批准", "批准"),
+            (r"(.+?)由(.+?)编制", "编制"),
+            (r"(.+?)对(.+?)监督管理", "监督管理"),
+        ]
 
-        for modality, keywords in rule_keywords.items():
-            for keyword in keywords:
-                if keyword in content:
-                    rules.append({
-                        "id": str(uuid.uuid4()),
-                        "label": f"规则：{keyword}",
-                        "subjects": [],
-                        "action": None,
-                        "objects": [],
-                        "modality": modality,
-                        "condition_text": None,
-                        "basis_text": None,
-                        "scope_text": None,
-                        "purpose_text": None,
-                        "evidence_text": f"从文本中识别的规则词：{keyword}",
-                        "source_chunk_id": chunk.id,
-                        "article_no": chunk.metadata.get("article_no", ""),
-                    })
-                    break
+        for pattern, relation in relation_patterns:
+            matches = re.findall(pattern, content)
+            for match in matches:
+                if isinstance(match, tuple) and len(match) >= 2:
+                    head = match[0].strip() if match[0] else ""
+                    tail = match[1].strip() if match[1] else ""
+
+                    if head and tail and len(head) > 1 and len(tail) > 1:
+                        label = f"{head} {relation} {tail}"
+                        article = chunk.metadata.get("article_no", "")
+                        rules.append({
+                            "id": str(uuid.uuid4()),
+                            "label": label,
+                            "head": head,
+                            "relation": relation,
+                            "tail": tail,
+                            "doc_title": self.doc_title,
+                            "article": article,
+                            "chunk_id": chunk_index,
+                            "source_text": content,
+                            "subjects": [head],
+                            "action": relation,
+                            "objects": [tail],
+                            "modality": None,
+                            "condition_text": None,
+                            "basis_text": None,
+                            "scope_text": None,
+                            "purpose_text": None,
+                            "evidence_text": content,
+                            "source_chunk_id": chunk.id,
+                            "article_no": article,
+                        })
 
         return {"rules": rules}
 
@@ -305,13 +347,14 @@ def extract_rule_kg(
     chunks: list[DocumentChunk],
     llm: Optional[BaseLLM] = None,
     progress_callback: Optional[callable] = None,
+    doc_title: str = "",
 ) -> RuleKnowledgeGraph:
-    extractor = RuleKGExtractor(llm)
+    extractor = RuleKGExtractor(llm, doc_title)
 
     all_rules = []
 
     for i, chunk in enumerate(chunks):
-        result = extractor.extract(chunk)
+        result = extractor.extract(chunk, i)
 
         for r in result.get("rules", []):
             all_rules.append(Rule(**r))

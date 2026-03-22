@@ -273,45 +273,10 @@ class DocumentStorage:
             ]
 
     def save_kg(self, kg: KnowledgeGraph) -> bool:
-        try:
-            with sqlite3.connect(self.db.db_path) as conn:
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO knowledge_graphs
-                    (document_id, entities, relations)
-                    VALUES (?, ?, ?)
-                    """,
-                    (
-                        kg.document_id,
-                        json.dumps([e.model_dump() for e in kg.entities]),
-                        json.dumps([r.model_dump() for r in kg.relations]),
-                    ),
-                )
-                return True
-        except sqlite3.IntegrityError:
-            return False
+        pass
 
     def get_kg(self, document_id: str) -> Optional[KnowledgeGraph]:
-        from src.schemas.types import KGEntity, KGRelation
-
-        with sqlite3.connect(self.db.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT * FROM knowledge_graphs WHERE document_id = ?",
-                (document_id,),
-            ).fetchone()
-
-            if row:
-                entities_data = json.loads(row["entities"])
-                relations_data = json.loads(row["relations"])
-                entities = [KGEntity(**e) for e in entities_data]
-                relations = [KGRelation(**r) for r in relations_data]
-                return KnowledgeGraph(
-                    document_id=document_id,
-                    entities=entities,
-                    relations=relations,
-                )
-            return None
+        pass
 
 
 def get_question_bank(db_path: Optional[str] = None) -> QuestionBank:

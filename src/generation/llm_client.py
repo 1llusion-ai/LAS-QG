@@ -38,15 +38,19 @@ class SiliconFlowClient(BaseLLM):
 
     def generate(self, prompt: str, **kwargs) -> str:
         temperature = kwargs.get("temperature", 0.7)
-        max_tokens = kwargs.get("max_tokens", 1000)
+        max_tokens = kwargs.get("max_tokens", 2000)
 
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=temperature,
-            max_tokens=max_tokens,
-        )
-        return response.choices[0].message.content
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"[LLM错误] 模型: {self.model}, 错误: {type(e).__name__}: {e}")
+            raise
 
     def generate_structured(self, prompt: str, response_model: type, **kwargs) -> Any:
         import json

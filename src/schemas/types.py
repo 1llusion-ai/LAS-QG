@@ -119,6 +119,13 @@ class RuleAction(BaseModel):
 class Rule(BaseModel):
     id: str
     label: str
+    head: Optional[str] = None
+    relation: Optional[str] = None
+    tail: Optional[str] = None
+    doc_title: Optional[str] = None
+    article: Optional[str] = None
+    chunk_id: Optional[int] = None
+    source_text: Optional[str] = None
     subjects: list[str] = Field(default_factory=list)
     action: Optional[str] = None
     objects: list[str] = Field(default_factory=list)

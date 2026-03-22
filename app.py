@@ -84,28 +84,22 @@ def init_llm():
 
 
 def visualize_kg(rule_kg):
-    st.success("规则知识图谱抽取完成！")
+    st.success("三元组抽取完成！")
 
-    st.metric("规则数量", len(rule_kg.rules))
+    st.metric("三元组数量", len(rule_kg.rules))
 
     if rule_kg.rules:
         for rule in rule_kg.rules:
-            subjects_str = "、".join(rule.subjects) if rule.subjects else "无"
-            objects_str = "、".join(rule.objects) if rule.objects else "无"
-
-            with st.expander(f"📜 {rule.label}"):
-                st.write(f"**主体：** {subjects_str}")
-                st.write(f"**动作：** {rule.action or '无'}")
-                st.write(f"**对象：** {objects_str}")
-                st.write(f"**情态：** {rule.modality or '无'}")
-                st.write(f"**条件：** {rule.condition_text or '无'}")
-                st.write(f"**依据：** {rule.basis_text or '无'}")
-                st.write(f"**范围：** {rule.scope_text or '无'}")
-                st.write(f"**目的：** {rule.purpose_text or '无'}")
-                st.write(f"**原文：** {rule.evidence_text or '无'}")
-                st.write(f"**来源：** {rule.article_no or '无'}")
+            with st.expander(f"🔗 {rule.head} → {rule.relation} → {rule.tail}"):
+                st.write(f"**head：** {rule.head}")
+                st.write(f"**relation：** {rule.relation}")
+                st.write(f"**tail：** {rule.tail}")
+                st.write(f"**doc_title：** {rule.doc_title or '无'}")
+                st.write(f"**article：** {rule.article or '无'}")
+                st.write(f"**chunk_id：** {rule.chunk_id}")
+                st.write(f"**source_text：** {rule.source_text or '无'}")
     else:
-        st.info("暂无规则")
+        st.info("暂无三元组")
 
 
 def visualize_graph(rule_kg):
@@ -329,26 +323,24 @@ def render_document_processing_section():
                                 f.write(f"Chunk {current}/{total} - 来源: {article_no}\n")
                                 f.write(f"{'='*60}\n\n")
 
-                                f.write(f"【规则】{len(result.get('rules', []))} 个\n")
+                                f.write(f"【三元组】{len(result.get('rules', []))} 个\n")
                                 for r in result.get('rules', []):
-                                    subjects_str = "、".join(r.get('subjects', [])) if r.get('subjects') else "无"
-                                    objects_str = "、".join(r.get('objects', [])) if r.get('objects') else "无"
-
-                                    f.write(f"  - {r.get('label', '无')}\n")
-                                    f.write(f"    主体: {subjects_str}\n")
-                                    f.write(f"    动作: {r.get('action') or '无'}\n")
-                                    f.write(f"    对象: {objects_str}\n")
-                                    f.write(f"    情态: {r.get('modality') or '无'}\n")
-                                    f.write(f"    条件: {r.get('condition_text') or '无'}\n")
-                                    f.write(f"    依据: {r.get('basis_text') or '无'}\n")
-                                    f.write(f"    范围: {r.get('scope_text') or '无'}\n")
-                                    f.write(f"    目的: {r.get('purpose_text') or '无'}\n")
-                                    f.write(f"    原文: {r.get('evidence_text') or '无'}\n\n")
+                                    f.write(json.dumps({
+                                        "head": r.get("head", ""),
+                                        "relation": r.get("relation", ""),
+                                        "tail": r.get("tail", ""),
+                                        "doc_title": r.get("doc_title", ""),
+                                        "article": r.get("article", ""),
+                                        "chunk_id": r.get("chunk_id", 0),
+                                        "source_text": r.get("source_text", "")
+                                    }, ensure_ascii=False, indent=2))
+                                    f.write("\n\n")
 
                             progress_bar.progress(current / total)
 
                         with st.spinner("正在抽取规则知识图谱..."):
-                            rule_kg = extract_rule_kg(document.id, chunks, llm, progress_callback=write_chunk_progress)
+                            doc_title = Path(document.filename).stem
+                            rule_kg = extract_rule_kg(document.id, chunks, llm, progress_callback=write_chunk_progress, doc_title=doc_title)
 
                         with open(json_file, "w", encoding="utf-8") as f:
                             json.dump({"document_id": document.id, "rules": all_rules}, f, ensure_ascii=False, indent=2)

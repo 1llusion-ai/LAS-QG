@@ -8,9 +8,9 @@ class LLMConfig(BaseModel):
     provider: str = "siliconflow"
     api_key: Optional[str] = "sk-msdwosvlpoyptcxnwshjzyclkgrvujevfhoawirgvxfmzwzf"
     base_url: Optional[str] = "https://api.siliconflow.cn/v1"
-    model: str = "Qwen/Qwen2.5-72B-Instruct"
+    model: str = "deepseek-ai/DeepSeek-V3"
     temperature: float = 0.7
-    max_tokens: int = 1000
+    max_tokens: int = 2000
 
 
 class ChunkConfig(BaseModel):
