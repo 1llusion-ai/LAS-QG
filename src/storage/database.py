@@ -285,3 +285,50 @@ def get_question_bank(db_path: Optional[str] = None) -> QuestionBank:
 
 def get_document_storage(db_path: Optional[str] = None) -> DocumentStorage:
     return DocumentStorage(db_path)
+
+
+class KGStorage:
+    def __init__(self):
+        pass
+
+    def save_to_neo4j(
+        self,
+        cypher_data: list,
+        document_id: str = None,
+        embed_func: callable = None,
+        create_index: bool = False,
+    ) -> dict:
+        from src.kg.neo4j_client import get_neo4j_client
+
+        try:
+            client = get_neo4j_client()
+            if document_id:
+                client.clear_graph(document_id)
+
+            if create_index:
+                client.create_vector_index()
+
+            if embed_func and callable(embed_func):
+                stats = client.save_kg_with_embedding(cypher_data, embed_func)
+            else:
+                stats = client.save_kg(cypher_data)
+
+            client.close()
+            return {"status": "success", "stats": stats}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    def get_from_neo4j(self, document_id: str = None) -> list:
+        from src.kg.neo4j_client import get_neo4j_client
+
+        try:
+            client = get_neo4j_client()
+            results = client.get_kg(document_id)
+            client.close()
+            return results
+        except Exception as e:
+            return []
+
+
+def get_kg_storage() -> KGStorage:
+    return KGStorage()

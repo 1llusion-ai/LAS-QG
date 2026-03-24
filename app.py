@@ -10,8 +10,10 @@ from src.parsers.document_parser import parse_document, detect_doc_type
 from src.cleaner.text_cleaner import clean_text
 from src.cleaner.text_chunker import chunk_document
 from src.kg.rule_extractor import extract_rule_kg
-from src.kg.kg_builder import build_rule_kg
+from src.kg.kg_builder import build_rule_kg, RuleKGBuilder
 from src.kg.txt_parser import parse_kg_txt
+from src.kg.neo4j_client import get_neo4j_client
+from src.storage.database import get_kg_storage
 from src.config import get_global_config
 from src.generation.llm_client import SiliconFlowClient
 from src.schemas.types import DifficultyLevel, DocumentChunk
@@ -105,29 +107,21 @@ def visualize_kg(rule_kg):
 def visualize_graph(rule_kg):
     st.markdown("### 知识图谱可视化")
 
-    graph = build_rule_kg(rule_kg.rules)
-    stats = {
-        "nodes": graph.number_of_nodes(),
-        "edges": graph.number_of_edges()
-    }
+    builder = build_rule_kg(rule_kg.rules)
+    graph = builder.get_graph()
+    stats = builder.get_graph_stats()
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("节点数", stats["nodes"])
+        st.metric("节点数", stats.get("nodes", 0))
     with col2:
-        st.metric("边数", stats["edges"])
+        st.metric("边数", stats.get("edges", 0))
     with col3:
         st.metric("规则数", len(rule_kg.rules))
 
     node_colors = {
-        "rule": "#FF6B6B",
-        "subject": "#4ECDC4",
-        "action": "#45B7D1",
-        "object": "#96CEB4",
-        "modality": "#FFEAA7",
-        "condition": "#DDA0DD",
-        "scope": "#98D8C8",
-        "purpose": "#F7DC6F"
+        "entity": "#4ECDC4",
+        "document": "#FF6B6B",
     }
 
     st.markdown("#### 节点类型图例")
@@ -136,7 +130,7 @@ def visualize_graph(rule_kg):
         with legend_cols[i % 4]:
             st.markdown(f"<span style='color:{color};font-size:20px'>●</span> {node_type}", unsafe_allow_html=True)
 
-    if graph.number_of_nodes() == 0:
+    if not graph or graph.number_of_nodes() == 0:
         st.info("图谱为空")
         return
 
@@ -153,7 +147,7 @@ def visualize_graph(rule_kg):
         net.add_node(node, label=label, color=color, title=f"{node_type}: {label}")
 
     for u, v, data in graph.edges(data=True):
-        edge_type = data.get("edge_type", "")
+        edge_type = data.get("relation", "")
         net.add_edge(u, v, title=edge_type, label=edge_type)
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as f:
@@ -233,6 +227,7 @@ def render_document_processing_section():
                             tmp_path = tmp_file.name
 
                         document = parse_document(tmp_path)
+                        document.filename = uploaded_file.name
                         cleaned_content = clean_text(document.content)
 
                         if len(cleaned_content.strip()) == 0:
@@ -342,6 +337,19 @@ def render_document_processing_section():
                             doc_title = Path(document.filename).stem
                             rule_kg = extract_rule_kg(document.id, chunks, llm, progress_callback=write_chunk_progress, doc_title=doc_title)
 
+                        builder = RuleKGBuilder()
+                        builder.build_from_rules([r.__dict__ for r in rule_kg.rules])
+                        cypher_data = builder.to_neo4j_cypher_data()
+                        kg_stats = builder.get_graph_stats()
+
+                        kg_storage = get_kg_storage()
+                        neo4j_result = kg_storage.save_to_neo4j(
+                            cypher_data,
+                            doc_title,
+                            embed_func=llm.embed,
+                            create_index=True
+                        )
+
                         with open(json_file, "w", encoding="utf-8") as f:
                             json.dump({"document_id": document.id, "rules": all_rules}, f, ensure_ascii=False, indent=2)
 
@@ -351,7 +359,13 @@ def render_document_processing_section():
                         progress_bar.empty()
                         status_text.empty()
                         st.success(f"已导出到: {export_file}")
-                        st.info(f"共抽取：{len(rule_kg.rules)} 条规则")
+                        st.info(f"共抽取：{len(rule_kg.rules)} 条三元组")
+                        st.info(f"图谱统计：{kg_stats}")
+                        if neo4j_result.get("status") == "success":
+                            st.success("Neo4j 入库成功！")
+                            st.json(neo4j_result.get("stats", {}))
+                        else:
+                            st.error(f"Neo4j 入库失败: {neo4j_result.get('error', '未知错误')}")
                         visualize_kg(rule_kg)
 
                     except Exception as e:
@@ -393,6 +407,10 @@ def render_kg_construction_section():
         if st.button("解析并构建知识图谱", key="btn_build_kg"):
             with st.spinner("正在解析和构建知识图谱..."):
                 try:
+                    config = get_global_config()
+                    api_key = os.getenv("SILICONFLOW_API_KEY") or config.llm.api_key
+                    llm = SiliconFlowClient(api_key=api_key)
+
                     with tempfile.NamedTemporaryFile(
                         delete=False, suffix=".txt"
                     ) as tmp_file:
@@ -410,8 +428,27 @@ def render_kg_construction_section():
                         'rules': [type('Rule', (), r)() for r in rules]
                     })()
 
+                    builder = RuleKGBuilder()
+                    builder.build_from_rules(rules)
+                    cypher_data = builder.to_neo4j_cypher_data()
+                    kg_stats = builder.get_graph_stats()
+
+                    kg_storage = get_kg_storage()
+                    neo4j_result = kg_storage.save_to_neo4j(
+                        cypher_data,
+                        Path(kg_file.name).stem,
+                        embed_func=llm.embed,
+                        create_index=True
+                    )
+
                     st.session_state["kg_rule_kg"] = rule_kg
                     st.info(f"已解析 {len(rules)} 条规则")
+                    st.info(f"图谱统计：{kg_stats}")
+                    if neo4j_result.get("status") == "success":
+                        st.success("Neo4j 入库成功！")
+                        st.json(neo4j_result.get("stats", {}))
+                    else:
+                        st.error(f"Neo4j 入库失败: {neo4j_result.get('error', '未知错误')}")
 
                     visualize_graph(rule_kg)
 

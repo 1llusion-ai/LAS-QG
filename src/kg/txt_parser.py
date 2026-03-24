@@ -1,104 +1,68 @@
 import re
+import json
 
 
 def parse_kg_txt(txt_path: str) -> list:
     rules = []
-    current_rule = None
 
     with open(txt_path, "r", encoding="utf-8") as f:
         content = f.read()
+
+    content = content.strip()
+
+    if content.startswith("["):
+        try:
+            triples = json.loads(content)
+            for i, triple in enumerate(triples):
+                rules.append({
+                    "id": f"rule_{i}",
+                    "label": f"{triple.get('head', '')} {triple.get('relation', '')} {triple.get('tail', '')}",
+                    "head": triple.get("head", ""),
+                    "relation": triple.get("relation", ""),
+                    "tail": triple.get("tail", ""),
+                    "doc_title": triple.get("doc_title", ""),
+                    "article": triple.get("article", ""),
+                    "chunk_id": triple.get("chunk_id", i),
+                    "source_text": triple.get("source_text", ""),
+                })
+            return rules
+        except json.JSONDecodeError:
+            pass
 
     lines = content.split("\n")
     i = 0
     while i < len(lines):
         line = lines[i].strip()
 
-        if line.startswith("Chunk "):
-            i += 1
-            continue
+        if line == "{" or (line.startswith("{") and line.endswith("{")):
+            json_str = line + "\n"
+            depth = line.count("{") - line.count("}")
+            j = i + 1
 
-        if line.startswith("【规则】"):
-            i += 1
-            continue
+            while j < len(lines) and depth > 0:
+                next_line = lines[j]
+                json_str += next_line + "\n"
+                depth += next_line.strip().count("{") - next_line.strip().count("}")
+                j += 1
 
-        if line.startswith("- "):
-            if current_rule:
-                rules.append(current_rule)
-
-            rule_label = line[2:].strip()
-            current_rule = {
-                "id": f"rule_{len(rules)}",
-                "label": rule_label,
-                "subjects": [],
-                "action": None,
-                "objects": [],
-                "modality": None,
-                "condition_text": None,
-                "basis_text": None,
-                "scope_text": None,
-                "purpose_text": None,
-                "evidence_text": None,
-                "source_chunk_id": None,
-                "article_no": None
-            }
-
-            i += 1
-            continue
-
-        if current_rule:
-            if line.startswith("主体:"):
-                value = line[3:].strip()
-                if value != "无":
-                    current_rule["subjects"] = [s.strip() for s in value.split("、") if s.strip()]
-
-            elif line.startswith("动作:"):
-                value = line[3:].strip()
-                if value != "无":
-                    current_rule["action"] = value
-
-            elif line.startswith("对象:"):
-                value = line[3:].strip()
-                if value != "无":
-                    current_rule["objects"] = [o.strip() for o in value.split("、") if o.strip()]
-
-            elif line.startswith("情态:"):
-                value = line[3:].strip()
-                if value != "无":
-                    current_rule["modality"] = value
-
-            elif line.startswith("条件:"):
-                value = line[3:].strip()
-                if value != "无":
-                    current_rule["condition_text"] = value
-
-            elif line.startswith("依据:"):
-                value = line[3:].strip()
-                if value != "无":
-                    current_rule["basis_text"] = value
-
-            elif line.startswith("范围:"):
-                value = line[3:].strip()
-                if value != "无":
-                    current_rule["scope_text"] = value
-
-            elif line.startswith("目的:"):
-                value = line[3:].strip()
-                if value != "无":
-                    current_rule["purpose_text"] = value
-
-            elif line.startswith("原文:"):
-                value = line[3:].strip()
-                if value != "无":
-                    current_rule["evidence_text"] = value
-
-            elif line.startswith("来源:"):
-                value = line[3:].strip()
-                if value != "无":
-                    current_rule["article_no"] = value
+            try:
+                triple = json.loads(json_str.strip())
+                if isinstance(triple, dict) and "head" in triple:
+                    rules.append({
+                        "id": f"rule_{len(rules)}",
+                        "label": f"{triple.get('head', '')} {triple.get('relation', '')} {triple.get('tail', '')}",
+                        "head": triple.get("head", ""),
+                        "relation": triple.get("relation", ""),
+                        "tail": triple.get("tail", ""),
+                        "doc_title": triple.get("doc_title", ""),
+                        "article": triple.get("article", ""),
+                        "chunk_id": triple.get("chunk_id", 0),
+                        "source_text": triple.get("source_text", ""),
+                    })
+                    i = j - 1
+            except json.JSONDecodeError:
+                pass
 
         i += 1
-
-    if current_rule:
-        rules.append(current_rule)
 
     return rules

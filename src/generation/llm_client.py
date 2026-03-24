@@ -12,6 +12,9 @@ class BaseLLM(ABC):
     def generate_structured(self, prompt: str, response_model: type, **kwargs) -> Any:
         pass
 
+    def embed(self, text: str, **kwargs) -> list[float]:
+        raise NotImplementedError("当前 LLM 不支持 embedding")
+
 
 class SiliconFlowClient(BaseLLM):
     def __init__(
@@ -19,6 +22,7 @@ class SiliconFlowClient(BaseLLM):
         api_key: Optional[str] = None,
         base_url: str = "https://api.siliconflow.cn/v1",
         model: str = "deepseek-ai/DeepSeek-V3",
+        embed_model: str = "BAAI/bge-large-zh-v1.5",
     ):
         try:
             from openai import OpenAI
@@ -31,6 +35,7 @@ class SiliconFlowClient(BaseLLM):
 
         self.base_url = base_url
         self.model = model
+        self.embed_model = embed_model
         self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
@@ -69,6 +74,17 @@ class SiliconFlowClient(BaseLLM):
         content = response.choices[0].message.content
         data = json.loads(content)
         return response_model(**data)
+
+    def embed(self, text: str, **kwargs) -> list[float]:
+        try:
+            response = self.client.embeddings.create(
+                model=self.embed_model,
+                input=text,
+            )
+            return response.data[0].embedding
+        except Exception as e:
+            print(f"[Embedding错误] 模型: {self.embed_model}, 错误: {type(e).__name__}: {e}")
+            raise
 
 
 class OpenAIClient(BaseLLM):
