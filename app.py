@@ -6,18 +6,15 @@ import hashlib
 import json
 import os
 
-from src.parsers.document_parser import parse_document, detect_doc_type
-from src.cleaner.text_cleaner import clean_text
-from src.cleaner.text_chunker import chunk_document
-from src.kg.rule_extractor import extract_rule_kg
-from src.kg.kg_builder import build_rule_kg, RuleKGBuilder
-from src.kg.txt_parser import parse_kg_txt
-from src.kg.neo4j_client import get_neo4j_client
-from src.storage.database import get_kg_storage
-from src.config import get_global_config
-from src.generation.llm_client import SiliconFlowClient
+from src.pipeline.parser import parse_document, detect_doc_type
+from src.pipeline.cleaner import clean_text
+from src.pipeline.chunker import chunk_document
+from src.pipeline.extractor import extract_rules
+from src.core.neo4j_client import get_neo4j_client
+from src.core.config import get_global_config
+from src.core.llm import SiliconFlowClient
 from src.schemas.types import DifficultyLevel, DocumentChunk
-import streamlit.components.v1 as components
+from src.agents.question_agent import QuestionAgent
 
 
 HASH_FILE = Path("data/uploaded_hashes.json")
@@ -83,79 +80,6 @@ def init_llm():
     except Exception as e:
         st.error(f"LLM 初始化失败: {str(e)}")
         return None
-
-
-def visualize_kg(rule_kg):
-    st.success("三元组抽取完成！")
-
-    st.metric("三元组数量", len(rule_kg.rules))
-
-    if rule_kg.rules:
-        for rule in rule_kg.rules:
-            with st.expander(f"🔗 {rule.head} → {rule.relation} → {rule.tail}"):
-                st.write(f"**head：** {rule.head}")
-                st.write(f"**relation：** {rule.relation}")
-                st.write(f"**tail：** {rule.tail}")
-                st.write(f"**doc_title：** {rule.doc_title or '无'}")
-                st.write(f"**article：** {rule.article or '无'}")
-                st.write(f"**chunk_id：** {rule.chunk_id}")
-                st.write(f"**source_text：** {rule.source_text or '无'}")
-    else:
-        st.info("暂无三元组")
-
-
-def visualize_graph(rule_kg):
-    st.markdown("### 知识图谱可视化")
-
-    builder = build_rule_kg(rule_kg.rules)
-    graph = builder.get_graph()
-    stats = builder.get_graph_stats()
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("节点数", stats.get("nodes", 0))
-    with col2:
-        st.metric("边数", stats.get("edges", 0))
-    with col3:
-        st.metric("规则数", len(rule_kg.rules))
-
-    node_colors = {
-        "entity": "#4ECDC4",
-        "document": "#FF6B6B",
-    }
-
-    st.markdown("#### 节点类型图例")
-    legend_cols = st.columns(4)
-    for i, (node_type, color) in enumerate(node_colors.items()):
-        with legend_cols[i % 4]:
-            st.markdown(f"<span style='color:{color};font-size:20px'>●</span> {node_type}", unsafe_allow_html=True)
-
-    if not graph or graph.number_of_nodes() == 0:
-        st.info("图谱为空")
-        return
-
-    from pyvis.network import Network
-    import tempfile
-
-    net = Network(height="500px", width="100%", bgcolor="#ffffff", font_color="black", notebook=False)
-    net.barnes_hut(gravity=-2000, central_gravity=0.3, spring_length=120)
-
-    for node, data in graph.nodes(data=True):
-        node_type = data.get("node_type", "unknown")
-        label = data.get("label", node)
-        color = node_colors.get(node_type, "#CCCCCC")
-        net.add_node(node, label=label, color=color, title=f"{node_type}: {label}")
-
-    for u, v, data in graph.edges(data=True):
-        edge_type = data.get("relation", "")
-        net.add_edge(u, v, title=edge_type, label=edge_type)
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as f:
-        net.save_graph(f.name)
-        html_content = open(f.name, "r", encoding="utf-8").read()
-
-    st.markdown("#### 交互式图谱（可拖拽、缩放）")
-    components.html(html_content, height=520, scrolling=True)
 
 
 def render_document_processing_section():
@@ -335,20 +259,13 @@ def render_document_processing_section():
 
                         with st.spinner("正在抽取规则知识图谱..."):
                             doc_title = Path(document.filename).stem
-                            rule_kg = extract_rule_kg(document.id, chunks, llm, progress_callback=write_chunk_progress, doc_title=doc_title)
-
-                        builder = RuleKGBuilder()
-                        builder.build_from_rules([r.__dict__ for r in rule_kg.rules])
-                        cypher_data = builder.to_neo4j_cypher_data()
-                        kg_stats = builder.get_graph_stats()
-
-                        kg_storage = get_kg_storage()
-                        neo4j_result = kg_storage.save_to_neo4j(
-                            cypher_data,
-                            doc_title,
-                            embed_func=llm.embed,
-                            create_index=True
-                        )
+                            rule_kg = extract_rules(
+                                document.id, 
+                                chunks, 
+                                llm, 
+                                progress_callback=write_chunk_progress, 
+                                doc_title=doc_title
+                            )
 
                         with open(json_file, "w", encoding="utf-8") as f:
                             json.dump({"document_id": document.id, "rules": all_rules}, f, ensure_ascii=False, indent=2)
@@ -360,108 +277,217 @@ def render_document_processing_section():
                         status_text.empty()
                         st.success(f"已导出到: {export_file}")
                         st.info(f"共抽取：{len(rule_kg.rules)} 条三元组")
-                        st.info(f"图谱统计：{kg_stats}")
-                        if neo4j_result.get("status") == "success":
-                            st.success("Neo4j 入库成功！")
-                            st.json(neo4j_result.get("stats", {}))
-                        else:
-                            st.error(f"Neo4j 入库失败: {neo4j_result.get('error', '未知错误')}")
-                        visualize_kg(rule_kg)
+
+                        with st.spinner("正在存入 Neo4j 知识图谱..."):
+                            try:
+                                neo4j_client = get_neo4j_client()
+                                neo4j_client.create_vector_index()
+                                neo4j_client.create_fulltext_index()
+
+                                cypher_data = []
+                                for i, chunk in enumerate(chunks):
+                                    chunk_key = f"{doc_title}_{i}"
+                                    cypher_data.append({
+                                        "type": "chunk",
+                                        "chunk_key": chunk_key,
+                                        "chunk_id": i,
+                                        "doc_title": doc_title,
+                                        "article": chunk.metadata.get("article_no", ""),
+                                        "source_text": chunk.content,
+                                    })
+
+                                for rule in rule_kg.rules:
+                                    cypher_data.append({
+                                        "type": "entity",
+                                        "name": rule.head,
+                                    })
+                                    cypher_data.append({
+                                        "type": "entity",
+                                        "name": rule.tail,
+                                    })
+                                    cypher_data.append({
+                                        "type": "relation",
+                                        "head": rule.head,
+                                        "tail": rule.tail,
+                                        "relation_text": rule.relation,
+                                        "doc_title": rule.doc_title,
+                                        "article": rule.article,
+                                        "chunk_id": rule.chunk_id,
+                                    })
+
+                                stats = neo4j_client.save_kg_with_embedding(
+                                    cypher_data,
+                                    embed_func=llm.embed if llm else None,
+                                )
+
+                                st.success(f"已存入 Neo4j 知识图谱")
+                                st.info(f"Chunks: {stats.get('chunks_created', 0)}, "
+                                       f"实体: {stats.get('entities_created', 0)}, "
+                                       f"关系: {stats.get('relations_created', 0)}, "
+                                       f"Embeddings: {stats.get('embeddings_generated', 0)}")
+
+                                if stats.get("errors"):
+                                    with st.expander("⚠️ 存储警告"):
+                                        for err in stats["errors"][:5]:
+                                            st.warning(err)
+
+                            except Exception as e:
+                                st.warning(f"存入 Neo4j 失败: {str(e)}")
+                                st.info("三元组已导出到本地文件，可稍后手动导入")
 
                     except Exception as e:
                         st.error(f"抽取规则知识图谱时出错：{str(e)}")
             else:
                 st.info("请先完成切块")
 
-    if "doc_rule_kg" in st.session_state:
-        st.divider()
-        st.subheader("已抽取的规则")
-        visualize_kg(st.session_state["doc_rule_kg"])
 
+def render_question_generation_section():
+    st.header("🎯 问题生成")
+    st.markdown("基于知识图谱生成低空安全相关问题")
 
-def render_kg_construction_section():
-    st.header("🕸️ KG构图（从TXT）")
-    st.markdown("上传包含规则知识的 TXT 文件，直接构建知识图谱")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        difficulty = st.selectbox(
+            "难度级别",
+            options=["easy", "medium", "hard"],
+            format_func=lambda x: {"easy": "简单", "medium": "中等", "hard": "困难"}[x],
+            index=2,
+            key="q_difficulty"
+        )
+    with col2:
+        question_type = st.selectbox(
+            "题目类型",
+            options=["choice", "judgment"],
+            format_func=lambda x: {"choice": "选择题", "judgment": "判断题"}[x],
+            index=0,
+            key="q_type"
+        )
+    with col3:
+        num_questions = st.number_input(
+            "题目数量",
+            min_value=1,
+            max_value=10,
+            value=1,
+            step=1,
+            key="q_num"
+        )
 
-    kg_file = st.file_uploader(
-        "选择KG规则文件",
-        type=["txt"],
-        key="kg_uploader",
-        help="上传格式化的KG规则TXT文件",
+    user_query = st.text_area(
+        "问题描述/要求（留空则随机出题）",
+        placeholder="例如：请生成关于无人机飞行许可的问题，或留空随机出题",
+        height=100,
+        key="q_query"
     )
 
-    if kg_file is not None:
-        is_valid, error_msg = validate_file(kg_file)
-        if not is_valid:
-            st.error(error_msg)
+    if st.button("生成问题", key="btn_generate"):
+        query = user_query.strip() if user_query.strip() else "随机出题"
+
+        llm = init_llm()
+        if llm is None:
             return
 
-        st.success(f"文件已上传：{kg_file.name}")
+        try:
+            neo4j_client = get_neo4j_client()
+        except Exception as e:
+            st.error(f"Neo4j 连接失败: {str(e)}")
+            return
 
-        kg_col1, kg_col2 = st.columns(2)
-        with kg_col1:
-            st.write("**文件名：**", kg_file.name)
-        with kg_col2:
-            st.write("**文件大小：**", f"{kg_file.size / 1024:.2f} KB")
+        agent = QuestionAgent(llm=llm, neo4j_client=neo4j_client)
 
-        if st.button("解析并构建知识图谱", key="btn_build_kg"):
-            with st.spinner("正在解析和构建知识图谱..."):
-                try:
-                    config = get_global_config()
-                    api_key = os.getenv("SILICONFLOW_API_KEY") or config.llm.api_key
-                    llm = SiliconFlowClient(api_key=api_key)
+        with st.spinner("正在生成问题..."):
+            try:
+                result = agent.run(
+                    user_query=query,
+                    difficulty=difficulty,
+                    question_type=question_type,
+                    num_questions=num_questions
+                )
 
-                    with tempfile.NamedTemporaryFile(
-                        delete=False, suffix=".txt"
-                    ) as tmp_file:
-                        tmp_file.write(kg_file.getvalue())
-                        tmp_path = tmp_file.name
+                st.session_state["agent_result"] = result
 
-                    rules = parse_kg_txt(tmp_path)
+            except Exception as e:
+                st.error(f"问题生成失败: {str(e)}")
+                return
 
-                    if not rules:
-                        st.warning("未能解析出规则，请检查文件格式")
-                        return
+    if "agent_result" in st.session_state:
+        result = st.session_state["agent_result"]
 
-                    rule_kg = type('RuleKG', (), {
-                        'document_id': Path(kg_file.name).stem,
-                        'rules': [type('Rule', (), r)() for r in rules]
-                    })()
+        st.subheader("📊 执行结果")
+        status = result.get("status", "unknown")
+        status_map = {
+            "success": ("✅ 成功", "green"),
+            "completed": ("✅ 完成", "green"),
+            "evaluated": ("📝 已评估", "blue"),
+            "error": ("❌ 错误", "red")
+        }
+        status_text, status_color = status_map.get(status, (status, "gray"))
+        st.markdown(f"**状态**: :{status_color}[{status_text}]")
 
-                    builder = RuleKGBuilder()
-                    builder.build_from_rules(rules)
-                    cypher_data = builder.to_neo4j_cypher_data()
-                    kg_stats = builder.get_graph_stats()
+        if result.get("error"):
+            st.error(f"错误信息: {result['error']}")
 
-                    kg_storage = get_kg_storage()
-                    neo4j_result = kg_storage.save_to_neo4j(
-                        cypher_data,
-                        Path(kg_file.name).stem,
-                        embed_func=llm.embed,
-                        create_index=True
-                    )
+        questions = result.get("questions", [])
+        if questions:
+            st.subheader(f"📝 生成的问题 ({len(questions)} 道)")
 
-                    st.session_state["kg_rule_kg"] = rule_kg
-                    st.info(f"已解析 {len(rules)} 条规则")
-                    st.info(f"图谱统计：{kg_stats}")
-                    if neo4j_result.get("status") == "success":
-                        st.success("Neo4j 入库成功！")
-                        st.json(neo4j_result.get("stats", {}))
-                    else:
-                        st.error(f"Neo4j 入库失败: {neo4j_result.get('error', '未知错误')}")
+            for i, q in enumerate(questions, 1):
+                with st.expander(f"问题 {i}", expanded=(i == 1)):
+                    st.markdown(f"**题目**: {q.get('question_text', 'N/A')}")
 
-                    visualize_graph(rule_kg)
+                    options = q.get("options", [])
+                    if options:
+                        st.markdown("**选项**:")
+                        for j, opt in enumerate(options):
+                            st.markdown(f"  {chr(65+j)}. {opt}")
 
-                except Exception as e:
-                    st.error(f"构建知识图谱时出错：{str(e)}")
+                    st.markdown(f"**答案**: {q.get('answer', 'N/A')}")
+                    st.markdown(f"**解释**: {q.get('explanation', 'N/A')}")
 
-    if "kg_rule_kg" not in st.session_state:
-        st.info("请上传 KG 规则文件并构建知识图谱")
+                    source_entities = q.get("source_entities", [])
+                    if source_entities:
+                        st.markdown(f"**相关实体**: {', '.join(source_entities)}")
+
+                    source_relations = q.get("source_relations", [])
+                    if source_relations:
+                        st.markdown(f"**相关关系**: {', '.join(source_relations)}")
+
+        evaluation = result.get("evaluation")
+        if evaluation:
+            st.subheader("📋 评估结果")
+            is_approved = evaluation.get("is_approved", False)
+            if is_approved:
+                st.success("✅ 问题质量通过评估")
+            else:
+                issues = evaluation.get("issues", [])
+                suggestions = evaluation.get("suggestions", [])
+                if issues:
+                    st.warning("⚠️ 存在问题:")
+                    for issue in issues:
+                        st.markdown(f"  - {issue}")
+                if suggestions:
+                    st.info("💡 改进建议:")
+                    for suggestion in suggestions:
+                        st.markdown(f"  - {suggestion}")
+
+        with st.expander("🔍 检索详情"):
+            chunks = result.get("chunks", [])
+            if chunks:
+                st.markdown(f"**检索到的文档块 ({len(chunks)} 个)**:")
+                for i, chunk in enumerate(chunks[:3], 1):
+                    st.markdown(f"  {i}. {chunk.get('doc_title', 'N/A')} - {chunk.get('article', 'N/A')}")
+
+            subgraph = result.get("subgraph", {})
+            if subgraph:
+                entities = subgraph.get("entities", [])
+                relations = subgraph.get("relations", [])
+                st.markdown(f"**子图信息**:")
+                st.markdown(f"  - 实体数量: {len(entities)}")
+                st.markdown(f"  - 关系数量: {len(relations)}")
 
 
 def main():
-    st.set_page_config(page_title="低空安全题库生成器")
-    st.title("低空安全题库生成器")
+    st.set_page_config(page_title="低空安全题库生成器", page_icon="📚")
+    st.title("📚 低空安全题库生成器")
 
     config = get_global_config()
 
@@ -470,12 +496,13 @@ def main():
         st.error("请设置 SILICONFLOW_API_KEY 环境变量")
         return
 
-    render_document_processing_section()
+    tab1, tab2 = st.tabs(["📄 文档处理", "🎯 问题生成"])
 
-    st.divider()
-    st.markdown("---")
+    with tab1:
+        render_document_processing_section()
 
-    render_kg_construction_section()
+    with tab2:
+        render_question_generation_section()
 
     st.sidebar.divider()
     st.sidebar.header("已上传文件记录")
